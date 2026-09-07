@@ -1,0 +1,204 @@
+@page "/document-routing"
+@rendermode InteractiveServer
+@inject ISchoolMcpClient McpClient
+@using SchoolRouting.Contracts
+
+<PageTitle>公文派發分析</PageTitle>
+
+<h1>公文派發分析</h1>
+<p>輸入公文內容後，頁面會呼叫 MCP 的 <code>semantic_search_responsibilities</code> 混合語意搜尋工具。</p>
+
+<div class="mb-3">
+    <label class="form-label" for="subject">公文主旨</label>
+    <input id="subject" class="form-control" @bind="Subject" />
+</div>
+
+<div class="mb-3">
+    <label class="form-label" for="content">公文內容</label>
+    <textarea id="content" class="form-control" rows="6" @bind="Content"></textarea>
+</div>
+
+<div class="d-flex gap-2">
+    <button class="btn btn-primary" disabled="@IsLoading" @onclick="SearchAsync">
+        @(IsLoading ? "查詢中…" : "分析派發對象")
+    </button>
+    <button class="btn btn-outline-secondary" disabled="@IsLoading" @onclick="CheckToolsAsync">
+        檢查 MCP 工具
+    </button>
+</div>
+
+@if (!string.IsNullOrWhiteSpace(StatusMessage))
+{
+    <div class="alert @(IsSuccess ? "alert-success" : "alert-danger") mt-3">
+        @StatusMessage
+    </div>
+}
+
+@if (ToolNames.Count > 0)
+{
+    <div class="card mt-3">
+        <div class="card-header">MCP Server 提供的工具</div>
+        <ul class="list-group list-group-flush">
+            @foreach (var toolName in ToolNames)
+            {
+                <li class="list-group-item"><code>@toolName</code></li>
+            }
+        </ul>
+    </div>
+}
+
+@if (Candidates.Count > 0)
+{
+    <div class="card mt-3">
+        <div class="card-header fw-semibold">建議派發對象</div>
+        <div class="card-body">
+            @{ var recommended = Candidates[0]; }
+            <div class="alert alert-primary mb-3">
+                <div class="fw-semibold">推薦主辦：@recommended.DepartmentName</div>
+                <div>
+                    @DisplayPerson(recommended)
+                    <span class="badge text-bg-primary ms-2">綜合分數 @recommended.MatchScore</span>
+                    <span class="badge bg-light text-dark border ms-1">信心：@recommended.Confidence</span>
+                </div>
+                <div class="mt-1">@recommended.Description</div>
+                <small class="d-block mt-1">@recommended.MatchReason</small>
+            </div>
+
+            <div class="table-responsive">
+                <table class="table table-hover align-middle mb-0">
+                    <thead>
+                        <tr>
+                            <th scope="col">排名</th>
+                            <th scope="col">處室</th>
+                            <th scope="col">承辦人</th>
+                            <th scope="col">工作職掌</th>
+                            <th scope="col">相關概念</th>
+                            <th scope="col" class="text-end">語意</th>
+                            <th scope="col" class="text-end">關鍵字</th>
+                            <th scope="col" class="text-end">綜合</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @for (var index = 0; index < Candidates.Count; index++)
+                        {
+                            var candidate = Candidates[index];
+                            <tr>
+                                <td>@(index + 1)</td>
+                                <td>
+                                    <div class="fw-semibold">@candidate.DepartmentName</div>
+                                    <small class="text-body-secondary">@candidate.DepartmentId</small>
+                                </td>
+                                <td>@DisplayPerson(candidate)</td>
+                                <td>@candidate.Description</td>
+                                <td>
+                                    @foreach (var term in candidate.MatchedTerms)
+                                    {
+                                        <span class="badge bg-light text-dark border me-1 mb-1">@term</span>
+                                    }
+                                </td>
+                                <td class="text-end">@candidate.SemanticScore</td>
+                                <td class="text-end">@candidate.KeywordScore</td>
+                                <td class="text-end">
+                                    <div class="fw-semibold">@candidate.MatchScore</div>
+                                    <small class="text-body-secondary">@candidate.Confidence</small>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+}
+else if (HasSearched && IsSuccess)
+{
+    <div class="alert alert-warning mt-3">找不到可供比較的工作職掌，請交由人工分文。</div>
+}
+
+@if (!string.IsNullOrWhiteSpace(ResultJson))
+{
+    <details class="card mt-3">
+        <summary class="card-header">顯示 MCP 原始結構化結果（除錯用）</summary>
+        <div class="card-body">
+            <pre class="mb-0 text-wrap">@ResultJson</pre>
+        </div>
+    </details>
+}
+
+@code {
+    private string Subject { get; set; } = "回報資安教育訓練完成情形";
+    private string Content { get; set; } = "教育部請各校彙整本年度教職員資訊安全教育訓練完成人數及時數。";
+    private string? ResultJson { get; set; }
+    private IReadOnlyList<ResponsibilityCandidate> Candidates { get; set; } = [];
+    private string? StatusMessage { get; set; }
+    private bool IsSuccess { get; set; }
+    private bool IsLoading { get; set; }
+    private bool HasSearched { get; set; }
+    private IReadOnlyList<string> ToolNames { get; set; } = [];
+
+    private async Task CheckToolsAsync()
+    {
+        await RunAsync(async () =>
+        {
+            ToolNames = await McpClient.ListToolNamesAsync();
+            IsSuccess = true;
+            StatusMessage = $"已連線 MCP Server，共發現 {ToolNames.Count} 個工具。";
+        });
+    }
+
+    private async Task SearchAsync()
+    {
+        if (string.IsNullOrWhiteSpace(Subject) && string.IsNullOrWhiteSpace(Content))
+        {
+            IsSuccess = false;
+            StatusMessage = "請輸入公文主旨或內容。";
+            return;
+        }
+
+        await RunAsync(async () =>
+        {
+            HasSearched = true;
+            var query = BuildDocumentText();
+            var result = await McpClient.SearchResponsibilitiesAsync(query);
+            IsSuccess = result.Success;
+            StatusMessage = result.Success
+                ? $"分析完成，共找到 {result.Candidates.Count} 個候選工作職掌。"
+                : result.Error ?? "MCP 工具呼叫失敗。";
+            Candidates = result.Candidates;
+            ResultJson = result.Json;
+        });
+    }
+
+    private static string DisplayPerson(ResponsibilityCandidate candidate)
+    {
+        if (string.IsNullOrWhiteSpace(candidate.PersonName))
+        {
+            return "尚未指定承辦人";
+        }
+
+        return string.IsNullOrWhiteSpace(candidate.PersonTitle)
+            ? candidate.PersonName
+            : $"{candidate.PersonName}（{candidate.PersonTitle}）";
+    }
+
+    private string BuildDocumentText() => $"主旨：{Subject}\n內容：{Content}";
+
+    private async Task RunAsync(Func<Task> action)
+    {
+        try
+        {
+            IsLoading = true;
+            StatusMessage = null;
+            await action();
+        }
+        catch (Exception exception)
+        {
+            IsSuccess = false;
+            StatusMessage = exception.Message;
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+}

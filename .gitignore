@@ -1,0 +1,10 @@
+.vs/
+.dotnet-cli/
+.packages/
+.local-packages/
+artifacts/
+.tools/
+**/bin/
+**/obj/
+*.user
+*.suo
